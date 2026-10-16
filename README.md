@@ -10,3 +10,5 @@ with GitHub Actions, Helm and Argo CD.
     pip install -r requirements-dev.txt
     pytest
     python app.py
+
+Notes: this app is deployed to GKE with GitHub Actions and Argo CD.
