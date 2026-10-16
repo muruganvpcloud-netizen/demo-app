@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+charts
+argocd
+__pycache__
+*.pyc
+.pytest_cache
+requirements-dev.txt
+test_app.py
+README.md
+image.tar
