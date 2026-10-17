@@ -1,0 +1,150 @@
+name: CI - test, scan, build, publish
+ 
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+ 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+ 
+permissions:
+  contents: read
+ 
+env:
+  REGION: asia-south1
+  REGISTRY: asia-south1-docker.pkg.dev/decent-craft-511710-k2/demo-repo
+  IMAGE_NAME: demo-app
+  # Security scanner, pinned to an exact version (see Step 6.3 for why)
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.69.3
+ 
+jobs:
+  test:
+    name: 1. Unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+ 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+ 
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+ 
+      - name: Run tests
+        run: pytest -v
+ 
+  scan-source:
+    name: 2. Security scan - source code and dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+ 
+      - name: Prepare scanner cache
+        run: mkdir -p "$HOME/.cache/trivy"
+ 
+      - name: Scan for vulnerable dependencies and leaked secrets (blocks on HIGH or CRITICAL)
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" fs \
+              --scanners vuln,secret \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --no-progress .
+ 
+      - name: Check Dockerfile and Helm chart for misconfigurations (report only)
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" config \
+              --severity HIGH,CRITICAL \
+              --exit-code 0 .
+ 
+  build-publish:
+    name: 3. Build image, scan image, publish
+    needs: [test, scan-source]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+ 
+      - name: Set the image tag (first 7 characters of the commit id)
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+ 
+      - name: Build the image
+        run: docker build -t "$IMAGE_NAME:$TAG" .
+ 
+      - name: Save the image to a file so it can be scanned
+        run: docker save "$IMAGE_NAME:$TAG" -o image.tar
+ 
+      - name: Prepare scanner cache
+        run: mkdir -p "$HOME/.cache/trivy"
+ 
+      - name: Scan the image - report HIGH and CRITICAL findings
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" image \
+              --input /work/image.tar \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 0 \
+              --no-progress
+ 
+      - name: Scan the image - block the pipeline on CRITICAL findings
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" image \
+              --input /work/image.tar \
+              --severity CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --no-progress
+ 
+      - name: Log in to Google Cloud
+        if: github.event_name != 'pull_request'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+ 
+      - name: Set up the gcloud tool
+        if: github.event_name != 'pull_request'
+        uses: google-github-actions/setup-gcloud@v3
+ 
+      - name: Allow Docker to push to Artifact Registry
+        if: github.event_name != 'pull_request'
+        run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+ 
+      - name: Push the image
+        if: github.event_name != 'pull_request'
+        run: |
+          docker tag "$IMAGE_NAME:$TAG" "$REGISTRY/$IMAGE_NAME:$TAG"
+          docker push "$REGISTRY/$IMAGE_NAME:$TAG"
+ 
+      - name: Update the Helm chart with the new image tag
+        if: github.event_name != 'pull_request'
+        run: |
+          sed -i "s|^  tag: .*|  tag: \"${TAG}\"|" charts/demo-app/values.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add charts/demo-app/values.yaml
+          if git diff --cached --quiet; then
+            echo "Tag already up to date - nothing to commit"
+          else
+            git commit -m "ci: deploy image ${TAG} [skip ci]"
+            git push origin HEAD:main
+          fi

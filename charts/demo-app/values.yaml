@@ -1,0 +1,16 @@
+replicaCount: 2
+ 
+image:
+  repository: asia-south1-docker.pkg.dev/decent-craft-511710-k2/demo-repo/demo-app
+  tag: "initial"
+  pullPolicy: IfNotPresent
+ 
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+ 
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
