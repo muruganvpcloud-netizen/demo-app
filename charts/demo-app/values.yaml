@@ -2,7 +2,7 @@ replicaCount: 2
  
 image:
   repository: asia-south1-docker.pkg.dev/decent-craft-511710-k2/demo-repo/demo-app
-  tag: "initial"
+  tag: "59e4dc2"
   pullPolicy: IfNotPresent
  
 service:
